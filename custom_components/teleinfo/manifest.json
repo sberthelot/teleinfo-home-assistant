@@ -1,0 +1,10 @@
+{
+  "domain": "teleinfo",
+  "name": "Teleinfo",
+  "version": "0.1",
+  "dependencies": [],
+  "codeowners": ["@sberthelot"],
+  "requirements": [
+    "pyserial-asyncio==0.4"
+  ]
+}
