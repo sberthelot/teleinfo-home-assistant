@@ -2,8 +2,8 @@
   "domain": "enedis",
   "name": "Teleinfo",
   "version": "0.1",
-  "issue_tracker": "https://github.com/sberthelot/teleinfo-home-assistant/issues"
-  "documentation": "https://raw.githubusercontent.com/sberthelot/teleinfo-home-assistant/main/README.md"
+  "issue_tracker": "https://github.com/sberthelot/teleinfo-home-assistant/issues",
+  "documentation": "https://raw.githubusercontent.com/sberthelot/teleinfo-home-assistant/main/README.md",
   "dependencies": [],
   "codeowners": ["@sberthelot"],
   "requirements": [
