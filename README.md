@@ -13,8 +13,8 @@ or your electricity reseller to change it to "standard".
 ## Installation
 ---
 ### Manual Installation
-  1. Copy teleinfo-home-assistant folder into your custom_components folder in your hass configuration directory.
-  2. Configure the `teleinfo-home-assistant` sensor (currently by editing configuration.yaml + sensor.yaml)
+  1. Copy teleinfo folder into your custom_components folder in your hass configuration directory.
+  2. Configure the `teleinfo-home-assistant` sensor (currently by editing configuration.yaml + sensor.yaml + customize.yaml)
   3. Restart Home Assistant.
 
 ### Installation with HACS (Home Assistant Community Store)

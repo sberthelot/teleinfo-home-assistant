@@ -1,6 +1,5 @@
 {
     "name": "Teleinfo",
-    "domains": ["teleinfo", "sensor", "electricity", "energy", "metering", "sensor"],
     "render_readme": true,
-    "iot_class": ["Assumed State"]
+    "country" : "FR"
 }
