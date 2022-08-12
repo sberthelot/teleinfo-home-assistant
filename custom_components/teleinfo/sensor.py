@@ -33,18 +33,21 @@ Sample configuration.yaml
 
 """
 import logging
+import datetime
+import serial
 
 import voluptuous as vol
 
 import homeassistant.helpers.config_validation as cv
-from homeassistant.components.sensor import PLATFORM_SCHEMA, STATE_CLASS_TOTAL_INCREASING, SensorEntity
+from homeassistant.components.sensor import PLATFORM_SCHEMA, STATE_CLASS_TOTAL_INCREASING
 from homeassistant.const import (
     CONF_NAME, EVENT_HOMEASSISTANT_STOP, ATTR_ATTRIBUTION, DEVICE_CLASS_ENERGY)
 from homeassistant.helpers.entity import Entity
 
-REQUIREMENTS = ['pyserial-asyncio==0.4']
-
 _LOGGER = logging.getLogger(__name__)
+
+FRAME_START = '\x02'
+FRAME_END = '\x03'
 
 CONF_SERIAL_PORT = 'serial_port'
 
@@ -57,81 +60,72 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string
 })
 
+TELEINFO_SELF_VALUE = 'EAST'
 
-async def async_setup_platform(hass, config, async_add_entities,discovery_info=None):
+TIMEOUT = 30
+
+def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up the Serial sensor platform."""
     name = config.get(CONF_NAME)
     port = config.get(CONF_SERIAL_PORT)
     sensor = SerialTeleinfoSensor(name, port)
 
-    hass.bus.async_listen_once(
-        EVENT_HOMEASSISTANT_STOP, sensor.stop_serial_read())
-    async_add_entities([sensor], True)
+    add_entities([sensor], True)
 
-
-class SerialTeleinfoSensor(SensorEntity):
+class SerialTeleinfoSensor(Entity):
     """Representation of a Serial sensor."""
 
     def __init__(self, name, port):
         """Initialize the Serial sensor."""
         self._name = name
         self._port = port
-        self._serial_loop_task = None
         self._state = None
-        self._attributes = {}
+        self._attributes = {
+            ATTR_ATTRIBUTION: CONF_ATTRIBUTION,
+        }
 
-    async def async_added_to_hass(self):
-        """Handle when an entity is about to be added to Home Assistant."""
-        self._serial_loop_task = self.hass.loop.create_task(
-            self.serial_read(self._port, baudrate=1200, bytesize=7,
-                             parity='E', stopbits=1, rtscts=1))
+    def update(self):
+        """Process the data."""
+        _LOGGER.debug("Start update")
+        is_over = False
 
-    async def serial_read(self, device, **kwargs):
-        """Process the serial data."""
-        import serial_asyncio
-        _LOGGER.debug(u"Initializing Teleinfo")
-        reader, _ = await serial_asyncio.open_serial_connection(url=device,
-                                                                **kwargs)
-
-        is_over = True
+        self._reader = serial.Serial(self._port, baudrate=9600, bytesize=7,
+            parity='E', stopbits=1, rtscts=1, timeout=TIMEOUT)
 
         # First read need to clear the grimlins.
-        line = await reader.readline()
+        line = self._reader.readline()
+        line = line.decode('ascii').replace('\r', '').replace('\n', '')
 
-        while True:
-            line = await reader.readline()
+        while FRAME_START not in line:
+            line = self._reader.readline()
             line = line.decode('ascii').replace('\r', '').replace('\n', '')
 
-            if is_over and ('\x02' in line):
-                is_over = False
-                _LOGGER.debug(" Start Frame")
-                continue
+        _LOGGER.debug(" Start Frame")
+        line=''
+        while FRAME_END not in line:
+            line = self._reader.readline()
+            line = line.decode('ascii').replace('\r', '').replace('\n', '')
 
-            if (not is_over) and ('\x03' not in line):
-                # Don't use strip() here because the checksum can be ' '.
-                if len(line.split()) == 2:
-                    # The checksum char is ' '.
-                    name, value = line.split()
-                else:
-                    name, value = line.split()[0:2]
+            s = line.split('\t')
+            if len(s) == 3:
+                name = s[0]
+                value = s[1]
+                checksum = s[2]
+                ts = None
+            elif len(s) == 4:
+                name = s[0]
+                value = s[2]
+                checksum = s[3]
+                raw_ts = s[1][1:1+2*5]
+                ts = datetime.datetime.strptime(raw_ts, "%y%m%d%H%S")
 
-                _LOGGER.debug(" Got : [%s] =  (%s)", name, value)
-                self._attributes[name] = value
+            _LOGGER.debug(" Got : [%s] =  (%s)", name, value)
+            self._attributes[name] = value
+            if name == TELEINFO_SELF_VALUE:
+                self._state = int(self._attributes[TELEINFO_SELF_VALUE])
 
-                if name == 'BASE':
-                    self._state = int(value)
-                continue
-
-            if (not is_over) and ('\x03' in line):
-                is_over = True
-                self.async_schedule_update_ha_state()
-                _LOGGER.debug(" End Frame")
-                continue
-
-    async def stop_serial_read(self):
-        """Close resources."""
-        if self._serial_loop_task:
-            self._serial_loop_task.cancel()
+        self._reader.close()
+        _LOGGER.debug(" End Frame")
 
     @property
     def name(self):
@@ -139,14 +133,8 @@ class SerialTeleinfoSensor(SensorEntity):
         return self._name
 
     @property
-    def should_poll(self):
-        """No polling needed."""
-        return False
-
-    @property
-    def device_state_attributes(self):
+    def extra_state_attributes(self):
         """Return the state attributes."""
-        self._attributes[ATTR_ATTRIBUTION] = CONF_ATTRIBUTION
         return self._attributes
 
     @property
