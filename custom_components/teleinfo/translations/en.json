@@ -1,0 +1,43 @@
+{
+    "config": {
+      "step": {
+        "user": {
+          "description": "If you need help with the configuration have a look here: https://github.com/sberthelot/teleinfo-home-assistant"
+        },
+        "detect": {
+          "description": "If you need help with the configuration have a look here: https://github.com/sberthelot/teleinfo-home-assistant",
+          "data": {
+            "device": "USB port"
+          }
+        },
+        "manual": {
+          "description": "If you need help with the configuration have a look here: https://github.com/sberthelot/teleinfo-home-assistant",
+          "data": {
+            "device": "USB port"
+          }
+        }
+      },
+      "error": {
+        "invaliddongle": "Invalid dongle path."
+      },
+      "abort": {
+        "single_instance_allowed": "Only a single instance is allowed."
+      }
+    },
+    "options": {
+      "step": {
+        "user": {
+          "data": {
+            "sensor": "Sensor enabled"
+          }
+        },
+        "init": {
+          "description": "If you need help with the configuration have a look here: https://github.com/sberthelot/teleinfo-home-assistant",
+          "data": {
+            "monitoredvars": "Monitored values",
+            "readtimeout": "Read Timeout"
+          }
+        }
+      }
+    }
+  }

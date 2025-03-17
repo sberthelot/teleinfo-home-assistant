@@ -5,11 +5,6 @@ Teleinfo is a French specific protocol used in electricity smart meters.
 It provides real time information on power consumption, rates and current on
 a user accessible serial port.
 
-For more details about this platform, please refer to the documentation at
-https://www.enedis.fr/sites/default/files/Enedis-NOI-CPT_02E.pdf
-
-Work based on https://github.com/nlamirault
-
 Sample configuration.yaml
 
     sensor:
@@ -32,133 +27,389 @@ Sample configuration.yaml
             icon_template: mdi:flash
 
 """
+from __future__ import annotations
+
 import logging
 import datetime
-import serial
+import asyncio
 
+from serial import SerialException
+import serial_asyncio_fast as serial_asyncio
 import voluptuous as vol
 
-import homeassistant.helpers.config_validation as cv
-from homeassistant.components.sensor import PLATFORM_SCHEMA, STATE_CLASS_TOTAL_INCREASING
+from datetime import timedelta
+from homeassistant.components.sensor import (
+    PLATFORM_SCHEMA as TELEINFO_PLATFORM_SCHEMA,
+    SensorEntity,
+    SensorStateClass,
+    SensorDeviceClass
+)
 from homeassistant.const import (
-    CONF_NAME, EVENT_HOMEASSISTANT_STOP, ATTR_ATTRIBUTION, DEVICE_CLASS_ENERGY)
+    CONF_NAME,
+    ATTR_ATTRIBUTION,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+    UnitOfEnergy,
+    UnitOfApparentPower
+)
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.device_registry import DeviceInfo, DeviceEntryType
+from homeassistant.helpers.event import (
+    async_track_time_interval,
+    async_track_state_change_event,
+)
+
+from .const import (
+    DOMAIN,
+    DEVICE_MANUFACTURER,
+    TIC_MODE_HISTORICAL,
+    TIC_MODE_STANDARD,
+    TELEINFO_ENTITIES
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+CONF_SERIAL_PORT = "serial_port"
+CONF_TIC_MODE = "tic_mode"
+CONF_REFRESH = "refresh"
+
+CONF_ATTRIBUTION = "Provided by EDF Teleinfo."
+
+DEFAULT_NAME = "Teleinfo Sensor"
+DEFAULT_TIC_MODE = TIC_MODE_HISTORICAL
 
 FRAME_START = '\x02'
 FRAME_END = '\x03'
 
-CONF_SERIAL_PORT = 'serial_port'
-
-CONF_ATTRIBUTION = "Provided by EDF Teleinfo."
-
 DEFAULT_NAME = "Serial Teleinfo Sensor"
+DEFAULT_REFRESH = 30
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+PLATFORM_SCHEMA = TELEINFO_PLATFORM_SCHEMA.extend({
     vol.Required(CONF_SERIAL_PORT): cv.string,
-    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string
+    vol.Required(CONF_TIC_MODE, default=DEFAULT_TIC_MODE): vol.In(
+        [
+            TIC_MODE_HISTORICAL,
+            TIC_MODE_STANDARD
+        ]),
+    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+    vol.Optional(CONF_REFRESH, default=DEFAULT_REFRESH): vol.In([10,30,60,120,300]),
 })
 
-TELEINFO_SELF_VALUE = 'EAST'
+TELEINFO_TOTAL_ENERGY_KEY = 'EAST'
 
-TIMEOUT = 30
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up the Serial sensor platform."""
-    name = config.get(CONF_NAME)
+async def async_setup_platform(
+    hass: HomeAssitant,
+    config: ConfigType,
+    async_add_entities: AddEntitiesCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> None :
+    """Set up the Teleinfo (serial) sensor platform."""
+    name = DOMAIN + " Energie active soutirée totale"
     port = config.get(CONF_SERIAL_PORT)
-    sensor = SerialTeleinfoSensor(name, port)
+    ticmode = config.get(CONF_TIC_MODE)
+    refresh = timedelta(seconds=int(config.get(CONF_REFRESH)))
+    
+    teleinfo_total_energy_serial_sensor_entity = TeleinfoTotalEnergySerialSensorEntity(name, port, ticmode, refresh)
+    
+    entities = [teleinfo_total_energy_serial_sensor_entity];
+    for eparam in TELEINFO_ENTITIES[ticmode]["string"]:
+        e = TeleinfoStringSensorEntity(eparam['name'], eparam['key'],
+            eparam['state_class'], eparam['device_class'], eparam['unit'], eparam['icon'])
+        entities.append(e)
 
-    add_entities([sensor], True)
+    for eparam in TELEINFO_ENTITIES[ticmode]["integer"]:
+        e = TeleinfoIntegerSensorEntity(eparam['name'], eparam['key'],
+            eparam['state_class'], eparam['device_class'], eparam['unit'], eparam['icon'])
+        entities.append(e)
 
-class SerialTeleinfoSensor(Entity):
-    """Representation of a Serial sensor."""
+    async_add_entities(entities, True)
 
-    def __init__(self, name, port):
-        """Initialize the Serial sensor."""
-        self._name = name
+class TeleinfoTotalEnergySerialSensorEntity(SensorEntity):
+    """Representation of a Teleinfo sensor."""
+
+    def __init__(
+        self,
+        name,
+        port,
+        ticmode,
+        refresh,
+    ):
+        """Initialize the Teleinfo Serial sensor."""
+        self._attr_has_entity_name = True
+        self._attr_name = name
+        self._attr_unique_id =f"teleinfo-{self._attr_name.lower()}"
         self._port = port
-        self._state = None
+        self._ticmode = ticmode
+        self._refresh = refresh
+        self._attr_native_value = None
+        
         self._attributes = {
             ATTR_ATTRIBUTION: CONF_ATTRIBUTION,
         }
 
-    def update(self):
-        """Process the data."""
-        _LOGGER.debug("Start update")
-        is_over = False
+    @callback
+    async def async_added_to_hass(self) -> None:
+        """Handle when an entity is about to be added to Home Assistant."""
+        
+        # Timer arm
+        self._timer_cancel = async_track_time_interval(
+            self.hass,
+            self.read_frame,
+            interval=self._refresh,
+        )
+        # Timer cancel
+        self.async_on_remove(self._timer_cancel)
 
-        self._reader = serial.Serial(self._port, baudrate=9600, bytesize=7,
-            parity='E', stopbits=1, rtscts=1, timeout=TIMEOUT)
+    @callback
+    async def read_frame(self,_):
+        """Read the data from the port."""
+        try:
+            if self._ticmode == TIC_MODE_HISTORICAL:
+                baudrate = 1200
+            else:
+                baudrate = 9600
+            
+            reader, writer = await serial_asyncio.open_serial_connection(
+                url=self._port,
+                baudrate=baudrate,
+                bytesize=serial_asyncio.serial.SEVENBITS,
+                parity=serial_asyncio.serial.PARITY_EVEN,
+                stopbits=serial_asyncio.serial.STOPBITS_ONE,
+                xonxoff=False,
+                rtscts=True,
+                dsrdtr=False,
+            )
+        except SerialException:
+            _LOGGER.exception("Unable to connect to the serial device %s", self._port)
+            await self._timer_cancel()
+        else:
+            _LOGGER.debug("Serial device %s connected", self._port)
+            
+            try:
+                # First read need to clear the grimlins.
+                line = await reader.readline()
+                line = line.decode('ascii').replace('\r', '').replace('\n', '')
+        
+                while FRAME_START not in line:
+                    line = await reader.readline()
+                    line = line.decode('ascii').replace('\r', '').replace('\n', '')
+        
+                _LOGGER.debug(" Start Frame")
+                
+                line=''
+                while FRAME_END not in line:
+                    line = await reader.readline()
+                    line = line.decode('ascii').replace('\r', '').replace('\n', '')
+                    
+                    s = line.split('\t')
+                    if len(s) == 3:
+                        key = s[0]
+                        value = s[1]
+                        checksum = s[2]
+                        ts = None
+                    elif len(s) == 4:
+                        key = s[0]
+                        value = s[2]
+                        checksum = s[3]
+                        raw_ts = s[1][1:1+2*5]
+                        ts = datetime.datetime.strptime(raw_ts, "%y%m%d%H%S")
+                        
+                    _LOGGER.debug(" Got : [%s] =  (%s)", key, value)
+                    self.hass.bus.fire(
+                        "teleinfo_"+ key + "_read_event",
+                        {"value": value, "timestamp": ts},
+                    )
+                    
+                    if key == TELEINFO_TOTAL_ENERGY_KEY:
+                        self._attr_native_value = int(value)
+                        self.async_write_ha_state()
+                
+                writer.close()
+                await writer.wait_closed()
+                
+                _LOGGER.debug(" End Frame")
+                
+            except SerialException:
+                _LOGGER.exception("Error while reading serial device %s", self._port)
+                await self._timer_cancel()
 
-        # First read need to clear the grimlins.
-        line = self._reader.readline()
-        line = line.decode('ascii').replace('\r', '').replace('\n', '')
+    def _validate_checksum(self,frame,checksum):
+        """Check if a frame is valid."""
+        # Checksum validation method B
+        datas = frame[:-1]
+        if self._validate_checksum_internal(datas, checksum):
+            return True
 
-        while FRAME_START not in line:
-            line = self._reader.readline()
-            line = line.decode('ascii').replace('\r', '').replace('\n', '')
+        # Checksum validation method A
+        datas = frame[:-2]
+        if self._validate_checksum_internal(datas, checksum):
+            return True
 
-        _LOGGER.debug(" Start Frame")
-        line=''
-        while FRAME_END not in line:
-            line = self._reader.readline()
-            line = line.decode('ascii').replace('\r', '').replace('\n', '')
+        _LOGGER.warning(
+            "Invalid checksum for %s : %s",
+            frame,
+            ord(checksum),
+        )
+        return False
+    
+    def _validate_checksum_internal(self, datas, checksum):
+        """Check if a frame is valid."""
+        computed_checksum = (sum(datas) & 0x3F) + 0x20
+        if computed_checksum == ord(checksum):
+            return True
 
-            s = line.split('\t')
-            if len(s) == 3:
-                name = s[0]
-                value = s[1]
-                checksum = s[2]
-                ts = None
-            elif len(s) == 4:
-                name = s[0]
-                value = s[2]
-                checksum = s[3]
-                raw_ts = s[1][1:1+2*5]
-                ts = datetime.datetime.strptime(raw_ts, "%y%m%d%H%S")
+        _LOGGER.debug(
+            "Invalid checksum for %s : %s != %s",
+            datas,
+            computed_checksum,
+            ord(checksum),
+        )
 
-            _LOGGER.debug(" Got : [%s] =  (%s)", name, value)
-            self._attributes[name] = value
-            if name == TELEINFO_SELF_VALUE:
-                self._state = int(self._attributes[TELEINFO_SELF_VALUE])
+        return False
 
-        self._reader.close()
-        _LOGGER.debug(" End Frame")
+    def detect():
+        """Return a list of candidate paths for USB Teleinfo dongles.
+
+        This method is currently a bit simplistic, it may need to be
+        improved to support more configurations and OS.
+        """
+        globs_to_test = [
+            "/dev/tty*",
+            "/dev/serial/by-id/*",
+            "/workspaces/integration_teleinfo/reader",
+        ]
+        found_paths = []
+        for current_glob in globs_to_test:
+            found_paths.extend(glob.glob(current_glob))
+
+        return found_paths
+
+    def validate_path(path: str):
+        """Return True if the provided path points to a valid serial port, False otherwise."""
+        try:
+            # Creating the serial communicator will raise an exception
+            # if it cannot connect
+            with serial.serial_for_url(url=path):
+                return True
+
+        except serial.SerialException as exception:
+            _LOGGER.warning("Serial path %s is invalid: %s", path, str(exception))
+            return False
 
     @property
-    def name(self):
-        """Return the name of the sensor."""
-        return self._name
-
-    @property
-    def extra_state_attributes(self):
-        """Return the state attributes."""
-        return self._attributes
-
-    @property
-    def state(self):
-        """Return the state of the sensor."""
-        return self._state
+    def should_poll(self) -> bool:
+        """Do not poll for those entities"""
+        return False
 
     @property
     def state_class(self):
-        return STATE_CLASS_TOTAL_INCREASING # so far no const available in homeassistant core
+        return SensorStateClass.TOTAL_INCREASING
 
     @property
     def device_class(self):
-        return DEVICE_CLASS_ENERGY
+        return SensorDeviceClass.ENERGY
 
     @property
-    def unique_id(self):
-        """Return a unique ID."""
-        return f"teleinfo-{self._name.lower()}"
-
-    @property
-    def unit_of_measurement(self):
-        return "Wh"
+    def native_unit_of_measurement(self) -> str | None:
+        return UnitOfEnergy.WATT_HOUR
 
     @property
     def icon(self):
         return "mdi:counter"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return the device info."""
+        return DeviceInfo(
+            entry_type=DeviceEntryType.SERVICE,
+            identifiers={(DOMAIN, TELEINFO_TOTAL_ENERGY_KEY)},
+            name=self._attr_name,
+            manufacturer=DEVICE_MANUFACTURER,
+            model=DOMAIN,
+        )
+        
+class TeleinfoStringSensorEntity(SensorEntity):
+    """Representation of a Teleinfo Integer sensor."""
+
+    def __init__(
+        self,
+        name,
+        key,
+        state_class,
+        device_class,
+        unit,
+        icon
+    ) -> None:
+        """Initialize"""
+        self._attr_has_entity_name = True
+        self._attr_name = name
+        self._attr_native_value = None
+        self._key = key
+        self._state_class = state_class
+        self._device_class = device_class
+        self._unit = unit
+        self._icon = icon
+
+        self._attributes = {
+            ATTR_ATTRIBUTION: CONF_ATTRIBUTION,
+        }
+
+    @callback
+    async def async_added_to_hass(self) -> None:
+        """Handle when an entity is about to be added to Home Assistant."""
+       
+        listener_cancel = self.hass.bus.async_listen(
+            "teleinfo_"+ self._key +"_read_event",
+            self._on_event,
+        )
+        
+        self.async_on_remove(listener_cancel)
+
+    @callback
+    async def _on_event(self, event: Event):
+        self._attr_native_value = event.data['value']
+        self.async_write_ha_state()
+
+    @property
+    def should_poll(self) -> bool:
+        """Do not poll for those entities"""
+        return False
+
+    @property
+    def state_class(self):
+        return self._state_class
+
+    @property
+    def device_class(self):
+        return self._device_class
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        return self._unit
+
+    @property
+    def icon(self):
+        return self._icon
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return the device info."""
+        return DeviceInfo(
+            entry_type=DeviceEntryType.SERVICE,
+            identifiers={(DOMAIN, self._key)},
+            name=self._attr_name,
+            manufacturer=DEVICE_MANUFACTURER,
+            model=DOMAIN,
+        )
+        
+class TeleinfoIntegerSensorEntity(TeleinfoStringSensorEntity):
+    """Representation of a Teleinfo Integer sensor."""
+
+    @callback
+    async def _on_event(self, event: Event):
+        self._attr_native_value = int(event.data['value'])
+        self.async_write_ha_state()

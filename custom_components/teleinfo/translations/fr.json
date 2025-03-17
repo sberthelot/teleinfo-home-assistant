@@ -1,0 +1,43 @@
+{
+    "config": {
+      "step": {
+        "user": {
+          "description": "Si vous avez besoin d'aide pour la configuration, regardez ici: https://github.com/sberthelot/teleinfo-home-assistant"
+        },
+        "detect": {
+          "description": "Si vous avez besoin d'aide pour la configuration, regardez ici: https://github.com/sberthelot/teleinfo-home-assistant",
+          "data": {
+            "device": "Port USB"
+          }
+        },
+        "manual": {
+          "description": "Si vous avez besoin d'aide pour la configuration, regardez ici: https://github.com/sberthelot/teleinfo-home-assistant",
+          "data": {
+            "device": "Port USB"
+          }
+        }
+      },
+      "error": {
+        "invaliddongle": "Dongle USB invalide."
+      },
+      "abort": {
+        "single_instance_allowed": "Une seule instance est autorisée."
+      }
+    },
+    "options": {
+      "step": {
+        "user": {
+          "data": {
+            "sensor": "Capteur activé"
+          }
+        },
+        "init": {
+          "description": "Si vous avez besoin d'aide pour la configuration, regardez ici: https://github.com/sberthelot/teleinfo-home-assistant",
+          "data": {
+            "monitoredvars": "Valeur à suivre",
+            "readtimeout": "Timeout en lecture"
+          }
+        }
+      }
+    }
+  }
